@@ -110,7 +110,7 @@ public final class Codefluence {
     }
 
     /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
-    public static let version = "0.1.1"
+    public static let version = "0.1.2"
 
     /// Info.plist의 URL Types에 등록된 스킴. 테스트가 바꿉니다.
     var registeredURLSchemes: () -> [String] = {
@@ -647,7 +647,7 @@ public final class Codefluence {
             } else if let http = response as? HTTPURLResponse {
                 let classification = ConfirmationFailureClass.forStatus(http.statusCode)
                 retryClass = classification
-                result = .failure(self.failure(1, "Referral confirmation was rejected by the server (HTTP \(http.statusCode))"))
+                result = http.statusCode == 409 ? .failure(self.failure(14, "confirmation rejected")) : .failure(self.failure(1, "Referral confirmation was rejected by the server (HTTP \(http.statusCode))"))
             } else {
                 // No HTTPURLResponse and no error: treat as transient.
                 result = .failure(self.failure(1, "Referral confirmation response is invalid"))
@@ -865,6 +865,7 @@ public final class Codefluence {
         case 11: return CodefluenceError.notConfigured(message: message)
         case 12: return CodefluenceError.noSubscriptionReference
         case 13: return CodefluenceError.subscriptionNotFound
+        case 14: return CodefluenceError.confirmationRejected
         default: return NSError(domain: "Codefluence", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }

@@ -47,7 +47,7 @@ Swift Package 매니페스트에서는:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.1")
+    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.2")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -167,6 +167,7 @@ Codefluence.shared.retryPendingConfirmation { result in
 | 11 | `notConfigured(message:)` | 미설정(pk_ 키/apiHost) | 불가 |
 | 12 | `noSubscriptionReference` | 저장된 lead/purchaseAccountToken 없음 | 불가 |
 | 13 | `subscriptionNotFound` | 서버에 구독 기록 없음(404) | 불가 |
+| 14 | `confirmationRejected` | 서버가 같은 고객의 다른 설치 확인을 거절(409). 재설치 뒤 Apple 앱 거래 ID로 증명되면 자동 복구되고, 그렇지 않으면 이 오류 | 불가 |
 
 ```swift
 switch result {

@@ -121,3 +121,14 @@ final class ValidateTests: XCTestCase {
     }
     #endif
 }
+
+// 서버가 같은 고객의 다른 설치(재설치 등)를 409로 거절하면 일반 네트워크 오류가 아니라 전용 오류로 알려 개발자가 구별할 수 있어야 한다.
+final class ConfirmationRejectedTests: XCTestCase {
+    func testErrorCodeAndRetryability() {
+        let error = CodefluenceError.confirmationRejected
+        XCTAssertEqual(error.code, 14)
+        XCTAssertFalse(error.isRetryable)
+        XCTAssertEqual((error as NSError).code, 14)
+        XCTAssertTrue(error.message.contains("rejected"))
+    }
+}

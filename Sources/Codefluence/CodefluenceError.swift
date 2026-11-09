@@ -35,6 +35,8 @@ public enum CodefluenceError: Error, Equatable {
     case noSubscriptionReference
     /// code 13 — the server has no subscription record for the saved references.
     case subscriptionNotFound
+    /// code 14 — the server rejected this install's confirmation because the customer was already confirmed by another install (for example after a reinstall without proof, or an ID collision). Retrying will not help.
+    case confirmationRejected
 
     /// Stable numeric code, unchanged from the pre-B6 SDK.
     public var code: Int {
@@ -52,6 +54,7 @@ public enum CodefluenceError: Error, Equatable {
         case .notConfigured: return 11
         case .noSubscriptionReference: return 12
         case .subscriptionNotFound: return 13
+        case .confirmationRejected: return 14
         }
     }
 
@@ -79,6 +82,7 @@ public enum CodefluenceError: Error, Equatable {
         case .notConfigured(let message): return message
         case .noSubscriptionReference: return "No confirmed referral is available to read subscription status"
         case .subscriptionNotFound: return "No subscription record was found for this customer"
+        case .confirmationRejected: return "Referral confirmation was rejected: this customer was already confirmed by another install"
         }
     }
 }
