@@ -47,7 +47,7 @@ Swift Package 매니페스트에서는:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.0")
+    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.1")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -55,6 +55,18 @@ targets: [
     ])
 ]
 ```
+
+## 출시 전 설치 점검
+
+```swift
+#if DEBUG
+Codefluence.shared.validate(urlScheme: "myapp") { checks in
+    // 콘솔에 [Codefluence] ✓/✗ 항목: 안내가 찍힙니다.
+}
+#endif
+```
+
+점검 항목: ① 설정(pk_ 키 모양·서버 주소, 비밀 키 sk_가 들어 있으면 실패) ② 서버와 키(실제로 heartbeat를 보내 키가 받아들여지는지, 플랫폼이 맞는지, 서버에 닿는지) ③ URL 스킴(`urlScheme`을 넘겼을 때 Info.plist URL Types에 등록돼 있는지). 실패하면 무엇을 고쳐야 하는지가 `hint`에 나옵니다. 통과하면 서버에 첫 신호가 도착해 대시보드 제품 연동 화면의 「앱 SDK 신호」가 바로 바뀝니다. `start`도 하루에 한 번 같은 신호를 자동으로 보냅니다. 토큰·키 값은 출력하지 않습니다. 디버그 빌드에서만 호출하세요.
 
 ## 설정과 첫 화면 확인
 

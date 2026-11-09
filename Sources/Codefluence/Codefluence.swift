@@ -109,6 +109,77 @@ public final class Codefluence {
         if shared.preferences.string(forKey: "codefluence.confirmedLeadId") != nil { shared.reportPurchases() }
     }
 
+    /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
+    public static let version = "0.1.1"
+
+    /// Info.plist의 URL Types에 등록된 스킴. 테스트가 바꿉니다.
+    var registeredURLSchemes: () -> [String] = {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] ?? [])
+            .flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }
+    }
+
+    /// 서버가 받는 계약 그대로 보냅니다: `platform`은 필수, 증명이 없으면 `attestation` 키를 뺍니다(null은 400).
+    func postHeartbeat(host: URL, key: String, appVersion: String?, sdkVersion: String, attestation: String?, completion: @escaping (Result<Int, Error>) -> Void) {
+        guard let url = URL(string: host.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/sdk/heartbeat") else {
+            completion(.failure(failure(11, "SDK is not configured"))); return
+        }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [
+            "platform": "ios",
+            "appVersion": appVersion ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            "sdkVersion": sdkVersion
+        ]
+        if let attestation { body["attestation"] = attestation }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        session.dataTask(with: request) { _, response, error in
+            if let error { completion(.failure(error)); return }
+            guard let http = response as? HTTPURLResponse else { completion(.failure(self.failure(1, "No HTTP response"))); return }
+            completion(.success(http.statusCode))
+        }.resume()
+    }
+
+    /// 출시 전 설치 점검. 키 모양, 서버 접속과 키 유효성(heartbeat를 실제로 보내므로 대시보드에 첫 신호가 바로 뜹니다),
+    /// 선택적으로 앱 URL 스킴 등록을 확인하고 항목별 통과·실패와 고칠 방법을 돌려줍니다. 결과는 콘솔에도 `[Codefluence]` 접두어로 찍습니다.
+    /// 디버그 빌드에서 부르세요. 토큰·키 값은 어디에도 출력하지 않습니다.
+    public func validate(urlScheme: String? = nil, completion: @escaping ([CodefluenceCheck]) -> Void) {
+        stateLock.lock(); let host = apiHost; let key = publicKey; stateLock.unlock()
+        var checks: [CodefluenceCheck] = []
+        let configured = key.hasPrefix("pk_") && key.count > 3 && host != nil
+        if configured {
+            checks.append(CodefluenceCheck(name: "설정", passed: true, hint: "pk_ 공개 키와 서버 주소가 설정돼 있어요"))
+        } else if key.hasPrefix("sk_") {
+            checks.append(CodefluenceCheck(name: "설정", passed: false, hint: "비밀 키(sk_)가 앱에 들어 있어요. 앱에는 pk_ 공개 키만 넣고 sk_ 키는 폐기하세요"))
+        } else {
+            checks.append(CodefluenceCheck(name: "설정", passed: false, hint: "pk_ 공개 키와 서버 주소(https://…)를 start 또는 configure에 넣으세요. 빌드 설정 값이 비어 있거나 xcconfig의 //에서 잘렸는지 확인하세요"))
+        }
+        let finish: () -> Void = { [self] in
+            if let urlScheme {
+                let registered = registeredURLSchemes().contains(where: { $0.caseInsensitiveCompare(urlScheme) == .orderedSame })
+                checks.append(CodefluenceCheck(name: "URL 스킴", passed: registered, hint: registered
+                    ? "\(urlScheme):// 스킴이 앱에 등록돼 있어요"
+                    : "앱의 URL Types에 스킴 \(urlScheme)을 등록하세요(Info.plist CFBundleURLTypes). 대시보드 제품 화면의 「앱 열기 스킴」에도 같은 값을 저장해야 소개 링크가 앱을 열어요"))
+            }
+            for check in checks { NSLog("[Codefluence] %@ %@: %@", check.passed ? "✓" : "✗", check.name, check.hint) }
+            DispatchQueue.main.async { completion(checks) }
+        }
+        guard configured, let host else { finish(); return }
+        postHeartbeat(host: host, key: key, appVersion: nil, sdkVersion: Codefluence.version, attestation: nil) { result in
+            switch result {
+            case .failure:
+                checks.append(CodefluenceCheck(name: "서버와 키", passed: false, hint: "서버에 연결하지 못했어요. 서버 주소(\(host.host ?? "?"))와 기기의 네트워크, 로컬 서버라면 ATS 설정을 확인하세요"))
+            case .success(let status):
+                switch status {
+                case 200..<300: checks.append(CodefluenceCheck(name: "서버와 키", passed: true, hint: "서버가 키를 받아들였고 첫 신호가 도착했어요"))
+                case 401, 403: checks.append(CodefluenceCheck(name: "서버와 키", passed: false, hint: "서버가 키를 거절했어요. pk_ 공개 키가 이 제품의 키가 맞는지, 폐기되지 않았는지 대시보드 「키와 결제 알림」에서 확인하세요"))
+                case 422: checks.append(CodefluenceCheck(name: "서버와 키", passed: false, hint: "키의 제품 플랫폼이 iOS가 아니에요. iOS 제품의 pk_ 키를 쓰세요(Android 제품 키와 섞이지 않았는지 확인)"))
+                default: checks.append(CodefluenceCheck(name: "서버와 키", passed: false, hint: "서버가 \(status)을 돌려줬어요. 잠시 뒤 다시 시도하고 계속되면 서버 주소를 확인하세요"))
+                }
+            }
+            finish()
+        }
+    }
+
     // MARK: - One-call helper
 
     /// Sets the SDK up in one call. Replaces the separate `configure`, launch confirmation,
@@ -132,6 +203,7 @@ public final class Codefluence {
                scheduler: ((TimeInterval, @escaping () -> Void) -> Void)? = nil) {
         stateLock.lock(); appUserIdProvider = appUserId; stateLock.unlock()
         #if canImport(UIKit)
+        heartbeat() // 하루 한 번. 대시보드의 「SDK 신호」가 첫 실행에 바로 뜬다.
         if foregroundObserver == nil {
             foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.resume() }
@@ -302,26 +374,25 @@ public final class Codefluence {
     public protocol AttestationProvider { func attest(completion: @escaping (String?) -> Void) }
     /// Sends at most one aggregate heartbeat per local day. The provider is an
     /// injectable App Attest implementation; no device identifier is sent.
-    public func heartbeat(appVersion: String? = nil, sdkVersion: String = "1", attestation: AttestationProvider? = nil, completion: ((Result<Void, Error>) -> Void)? = nil) {
+    public func heartbeat(appVersion: String? = nil, sdkVersion: String = Codefluence.version, attestation: AttestationProvider? = nil, completion: ((Result<Void, Error>) -> Void)? = nil) {
         let day = ISO8601DateFormatter().string(from: Date()).prefix(10)
         let key = "codefluence.heartbeat.\(day)"
         stateLock.lock(); if preferences.bool(forKey: key) { stateLock.unlock(); completion?(.success(())); return }; stateLock.unlock()
         stateLock.lock(); let host = apiHost; let keyValue = publicKey; stateLock.unlock()
-        guard let host, let url = URL(string: host.absoluteString + "/sdk/heartbeat"), keyValue.hasPrefix("pk_") else { completion?(.failure(failure(11, "SDK is not configured"))); return }
+        guard let host, keyValue.hasPrefix("pk_") else { completion?(.failure(failure(11, "SDK is not configured"))); return }
         let send: (String?) -> Void = { [weak self] assertion in
             guard let self else { return }
-            var request = URLRequest(url: url); request.httpMethod = "POST"; request.setValue("Bearer \(keyValue)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = ["appVersion": appVersion ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown", "sdkVersion": sdkVersion, "attestation": assertion ?? NSNull()]
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            self.session.dataTask(with: request) { data, response, error in
-                if let error { completion?(.failure(error)); return }
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { completion?(.failure(self.failure(1, "Heartbeat failed"))); return }
-                self.preferences.set(true, forKey: key); completion?(.success(()))
-            }.resume()
+            self.postHeartbeat(host: host, key: keyValue, appVersion: appVersion, sdkVersion: sdkVersion, attestation: assertion) { result in
+                switch result {
+                case .failure(let error): completion?(.failure(error))
+                case .success(let status):
+                    guard (200..<300).contains(status) else { completion?(.failure(self.failure(1, "Heartbeat failed"))); return }
+                    self.preferences.set(true, forKey: key); completion?(.success(()))
+                }
+            }
         }
         if let attestation { attestation.attest(completion: send) } else { send(nil) }
     }
-
 
     @MainActor
     public func showConfirmationIfNeeded(from presenter: UIViewController, appUserId: String, clickToken: String? = nil, completion: @escaping (Result<String?, Error>) -> Void) {
