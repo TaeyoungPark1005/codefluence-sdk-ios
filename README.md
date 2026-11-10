@@ -47,7 +47,7 @@ Swift Package 매니페스트에서는:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.2")
+    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.3")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -144,7 +144,7 @@ Codefluence.shared.retryPendingConfirmation { result in
 }
 ```
 
-재시도하지 않는 경우: 사용자가 **거절**한 경우, 이미 **완료(confirmed)**된 경우, **무귀속(no-attribution)** 확정, 서버가 돌려준 **영구 오류(400/401/403/404/409/422)**. 이때 큐를 비우고 더 보내지 않습니다. **408/429/5xx·네트워크 오류**만 backoff로 재시도합니다. 요청 timeout은 5초이며 유효한 비어 있지 않은 leadId를 받은 뒤 완료로 저장합니다. 진행 중 요청과 표시 중 확인 창은 중복 시작하지 않고, `confirm`을 다른 토큰·고객 ID로 바꿔 동의한 대기 요청을 덮어쓸 수 없습니다. 완료 뒤 같은 고객의 직접 `confirm`은 저장된 leadId를 반환합니다. 이전 버전의 결정에는 예·아니오 구분이 없으므로 동의 증거 없이 retry 대상으로 승격하지 않습니다.
+재시도하지 않는 경우: 사용자가 **거절**한 경우, 이미 **완료(confirmed)**된 경우, 서버가 돌려준 **영구 오류(400/401/403/404/409/422)**. 이때 큐를 비우고 더 보내지 않습니다. **408/429/5xx·네트워크 오류**만 backoff로 재시도합니다. 요청 timeout은 5초이며 유효한 비어 있지 않은 leadId를 받은 뒤 완료로 저장합니다. 진행 중 요청과 표시 중 확인 창은 중복 시작하지 않고, `confirm`을 다른 토큰·고객 ID로 바꿔 동의한 대기 요청을 덮어쓸 수 없습니다. 완료 뒤 같은 고객의 직접 `confirm`은 저장된 leadId를 반환합니다. 이전 버전의 결정에는 예·아니오 구분이 없으므로 동의 증거 없이 retry 대상으로 승격하지 않습니다.
 
 설치 복원 보장, 스토어 구매 연결, 실제 확인 시트는 별도 기기 QA가 필요합니다. 전체 서버·웹훅 예제는 실행 중인 Codefluence의 `/docs`에 있습니다.
 
@@ -205,7 +205,7 @@ xcodebuild -scheme Codefluence -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath /tmp/codefluence-sdk-ios-build CODE_SIGNING_ALLOWED=NO build
 ```
 
-단위 테스트는 별도 UserDefaults suite와 모의 URLSession transport를 사용합니다. 토큰 없음 결정의 재생성 후 유지·추가 요청 차단, 늦은 복원의 동의 상태 보존, 한·영 문구, 거절 시 요청 없음, 동의한 실패의 동일 payload 재시도, 고객·토큰 덮어쓰기 방지, 빈 leadId 응답, 동시 요청·확인 창 admission을 확인합니다. A3 backoff 계산·지터 범위·분류·재실행/네트워크 복구 재전송·영구오류 미재시도·동일 Idempotency-Key 유지·시도 상한, B6 코드 매핑·NSError 브리지, C3 구독 응답 파싱·에러도 확인합니다. PrivacyInfo 리소스를 파싱해 UserDefaults CA92.1만 선언하고 pasteboard 범주가 없음을 확인합니다. 실제 HTTP·구매·UIKit 화면 조작은 수행하지 않습니다.
+단위 테스트는 별도 UserDefaults suite와 모의 URLSession transport를 사용합니다. 토큰 없는 소프트 상태 유지·명시적 링크 복원·null 응답·중복 차단, 늦은 복원의 동의 상태 보존, 한·영 문구, 거절 시 요청 없음, 동의한 실패의 동일 payload 재시도, 고객·토큰 덮어쓰기 방지, 빈 leadId 응답, 동시 요청·확인 창 admission을 확인합니다. A3 backoff 계산·지터 범위·분류·재실행/네트워크 복구 재전송·영구오류 미재시도·동일 Idempotency-Key 유지·시도 상한, B6 코드 매핑·NSError 브리지, C3 구독 응답 파싱·에러도 확인합니다. PrivacyInfo 리소스를 파싱해 UserDefaults CA92.1만 선언하고 pasteboard 범주가 없음을 확인합니다. 실제 HTTP·구매·UIKit 화면 조작은 수행하지 않습니다.
 
 ## 결제 보고 (`reportPurchases`)
 
@@ -214,3 +214,22 @@ RevenueCat 등 어떤 결제 SDK로 결제했든, 결제 성공 뒤 `Codefluence
 - 소모성 상품은 Info.plist에 `SKIncludeConsumableInAppPurchaseHistory = YES`가 있어야 처리 완료 뒤에도 거래가 보입니다.
 - 개인정보 매니페스트는 구매 내역·사용자 ID를 "사용자와 연결, 추적 아님, 개발자 광고·마케팅"으로 선언합니다. 소개 클릭과 앱 결제를 잇는 것이 Apple의 "추적"(ATT 대상)에 해당하는지는 출시 전 확인 항목입니다.
 - 근거 문서: https://developer.apple.com/documentation/storekit/apptransaction/apptransactionid , https://developer.apple.com/documentation/storekit/transaction/all
+
+## 기존 무료 사용자 귀속 옵션
+
+첫 실행에서 토큰이 없으면 `noTokenAtLaunch` 소프트 상태로 저장하고 서버 요청 없이 일반 시작으로 처리한다
+이후 랜딩 버튼으로 앱을 열어 `handle(url:)`(iOS) 또는 `handle`(Android)에 전달한 서명 형식 토큰만 다시 확인한다
+이 경로에서는 클립보드와 Install Referrer를 다시 읽지 않으며 서버가 HMAC 서명·제품·만료·클릭을 검증한다
+명시적 아니오는 영구 유지하고 accepted·pending·confirmedLeadId가 있으면 새 링크로 덮어쓰지 않는다
+이전 SDK의 `decisionMade=true, accepted=false`는 자동 무귀속과 명시 거절을 구분할 수 없으므로 영구 유지한다
+
+확인 요청의 `launchKind`는 기본 `first_launch`, 소프트 상태의 링크 복원은 `later`다
+`later`는 클릭 캠페인과 크리에이터 그룹의 현재 발효 조건 `includeExistingUsers=true`일 때만 lead를 만든다
+기본값은 false이며 미허용 응답은 `200 { "leadId": null, "reason": "existing_users_not_included" }`다
+SDK는 이 응답에서 대기 큐와 해당 링크를 지우고 소프트 상태로 돌아가며 자동 재전송하지 않는다
+나중에 새 링크를 열면 다시 확인할 수 있다
+`autoConfirmIfAvailable`는 성공한 일반 시작으로 nil/null을 반환하며, 반환형이 문자열인 iOS 호환 `confirm`은 성공 lead가 없으므로 오류를 반환하되 영구 거절을 저장하지 않는다
+
+기존 무료 사용자의 첫 유료 전환만 새 귀속 대상이며 기존 유료 고객은 제외한다
+스토어가 검증한 최초 구매 시각이 lead 생성보다 이르면 구매 이름표·고객 ID·원 거래 참조로 대조하여 `Conversion.exclusion=existing_customer`로 남기고 보상을 만들지 않는다
+갱신은 원 거래의 최초 귀속과 첫 구매의 `termsId`를 유지한다

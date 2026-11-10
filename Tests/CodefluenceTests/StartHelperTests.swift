@@ -114,8 +114,8 @@ final class StartHelperTests: XCTestCase {
         sdk.begin(appUserId: { self.userId }, launchGrace: 0.8, scheduler: { _, work in scheduled.append(work) })
         XCTAssertEqual(scheduled.count, 1)
         scheduled.forEach { $0() }
-        waitUntil { self.defaults.bool(forKey: "codefluence.decisionMade") }
-        XCTAssertTrue(defaults.bool(forKey: "codefluence.decisionMade"))
+        waitUntil { self.defaults.bool(forKey: "codefluence.noTokenAtLaunch") }
+        XCTAssertTrue(defaults.bool(forKey: "codefluence.noTokenAtLaunch"))
         XCTAssertTrue(confirms().isEmpty)
     }
 

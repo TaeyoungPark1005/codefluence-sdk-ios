@@ -110,7 +110,7 @@ public final class Codefluence {
     }
 
     /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
-    public static let version = "0.1.2"
+    public static let version = "0.1.3"
 
     /// Info.plist의 URL Types에 등록된 스킴. 테스트가 바꿉니다.
     var registeredURLSchemes: () -> [String] = {
@@ -231,10 +231,43 @@ public final class Codefluence {
         guard let token, token.range(of: #"^[^./?#]+\.[^./?#]+\.[0-9]+\.[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { return false }
         stateLock.lock()
         let alreadyDecided = preferences.bool(forKey: "codefluence.decisionMade")
-        if !alreadyDecided { preferences.set(token, forKey: "codefluence.clickToken") }
+        let locked = alreadyDecided || preferences.bool(forKey: "codefluence.accepted") || preferences.object(forKey: "codefluence.pendingToken") != nil || preferences.object(forKey: "codefluence.pendingAppUserId") != nil || preferences.object(forKey: "codefluence.confirmedLeadId") != nil
+        if !locked {
+            preferences.set(token, forKey: "codefluence.clickToken")
+            if preferences.bool(forKey: "codefluence.noTokenAtLaunch") { preferences.set(token, forKey: "codefluence.laterLinkToken") }
+        }
+        let confirmed = preferences.string(forKey: "codefluence.confirmedLeadId") != nil
+        let savedToken = preferences.string(forKey: "codefluence.clickToken")
         stateLock.unlock()
+        // 이미 소개로 확인된 설치가 다른 링크를 다시 열었다: 첫 소개자는 그대로 두고, 서버에 "이 링크를 열었다"만 알린다.
+        // 소모성(일회성) 재결제를 결제 직전에 연 링크의 크리에이터에게 귀속하는 근거다.
+        if confirmed, token != savedToken { reportReferralTouch(token: token) }
         resume()
         return true
+    }
+
+    /// 확인된 설치가 다른 크리에이터의 링크를 다시 열었음을 `/track/touch`로 알린다. 서버가 받아들였거나 영구 오류로 거절한 링크는 다시 보내지 않고,
+    /// 일시 오류·연결 실패는 같은 링크를 다시 열 때 다시 시도한다. 응답은 기록 여부만 알려 주며 앱 동작에는 영향이 없다.
+    private func reportReferralTouch(token: String) {
+        stateLock.lock()
+        let host = apiHost; let key = publicKey
+        let appUserId = preferences.string(forKey: "codefluence.confirmedAppUserId")
+        let installToken = preferences.string(forKey: "codefluence.purchaseAccountToken")
+        let reported = preferences.stringArray(forKey: "codefluence.touchedTokens") ?? []
+        stateLock.unlock()
+        guard let host, key.hasPrefix("pk_"), let appUserId, let installToken, !reported.contains(token),
+              let url = URL(string: host.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/track/touch") else { return }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["clickToken": token, "appUserId": appUserId, "purchaseAccountToken": installToken])
+        session.dataTask(with: request) { [weak self] _, response, _ in
+            guard let self, let status = (response as? HTTPURLResponse)?.statusCode else { return }
+            guard (200..<300).contains(status) || [400, 401, 403, 404, 409, 422].contains(status) else { return }
+            self.stateLock.lock()
+            var list = self.preferences.stringArray(forKey: "codefluence.touchedTokens") ?? []
+            list.append(token); self.preferences.set(Array(list.suffix(20)), forKey: "codefluence.touchedTokens")
+            self.stateLock.unlock()
+        }.resume()
     }
 
     /// Confirms a saved or copied referral and reports purchases, once the customer ID is known.
@@ -332,6 +365,7 @@ public final class Codefluence {
     /// the detection API for privacy-safe pasteboard access.
     @MainActor
     public func restoreReferralTokenAsync() async -> String? {
+        if preferences.bool(forKey: "codefluence.noTokenAtLaunch") { return preferences.string(forKey: "codefluence.laterLinkToken") }
         if let saved = preferences.string(forKey: "codefluence.clickToken"), !saved.isEmpty { return saved }
         guard (try? await pasteboard.containsProbableWebURL()) == true else { return nil }
         guard let pasted = pasteboard.string, let token = validReferralURL(pasted) else { return nil }
@@ -439,7 +473,8 @@ public final class Codefluence {
         alert.addAction(UIAlertAction(title: copy.yes, style: .default) { [weak self] _ in
             self?.gate.endPrompt()
             self?.confirm(clickToken: token, appUserId: appUserId) { result in
-                completion(result.map { Optional($0) })
+                if case .failure(let error) = result, error is ExistingUsersNotIncluded { completion(.success(nil)) }
+                    else { completion(result.map { Optional($0) }) }
             }
         })
         presenter.present(alert, animated: true)
@@ -473,7 +508,8 @@ public final class Codefluence {
             case .present(let token):
                 gate.endPrompt()
                 confirm(clickToken: token, appUserId: appUserId) { result in
-                    completion(result.map { Optional($0) })
+                    if case .failure(let error) = result, error is ExistingUsersNotIncluded { completion(.success(nil)) }
+                    else { completion(result.map { Optional($0) }) }
                 }
             case .noAttribution:
                 gate.endPrompt()
@@ -484,6 +520,10 @@ public final class Codefluence {
                 let savedCustomer = preferences.string(forKey: "codefluence.confirmedAppUserId")
                 deliverOptional(savedCustomer == nil || savedCustomer == appUserId ? .success(leadId) : .failure(failure(4, "Referral attribution belongs to a different customer")), completion)
             }
+        }
+        if preferences.bool(forKey: "codefluence.noTokenAtLaunch") {
+            finish(preferences.string(forKey: "codefluence.laterLinkToken"))
+            return
         }
         #if canImport(UIKit)
         if let clickToken { finish(clickToken); return }
@@ -505,9 +545,9 @@ public final class Codefluence {
               preferences.object(forKey: "codefluence.pendingToken") == nil,
               preferences.object(forKey: "codefluence.pendingAppUserId") == nil,
               preferences.object(forKey: "codefluence.confirmedLeadId") == nil else { return .skip }
+        if preferences.bool(forKey: "codefluence.noTokenAtLaunch") && (token == nil || token != preferences.string(forKey: "codefluence.laterLinkToken")) { return .noAttribution }
         if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .present(token) }
-        preferences.set(true, forKey: "codefluence.decisionMade")
-        preferences.set(false, forKey: "codefluence.accepted")
+        preferences.set(true, forKey: "codefluence.noTokenAtLaunch")
         return .noAttribution
     }
 
@@ -535,6 +575,14 @@ public final class Codefluence {
             stateLock.unlock()
             deliver(.failure(failure(5, "Retry must preserve the accepted token and customer ID")), completion)
             return
+        }
+        if preferences.bool(forKey: "codefluence.noTokenAtLaunch"), preferences.string(forKey: "codefluence.pendingToken") == nil, clickToken != preferences.string(forKey: "codefluence.laterLinkToken") {
+            stateLock.unlock()
+            deliver(.failure(failure(3, "A later referral must arrive through a link")), completion)
+            return
+        }
+        if preferences.string(forKey: "codefluence.pendingLaunchKind") == nil {
+            preferences.set(preferences.bool(forKey: "codefluence.noTokenAtLaunch") ? "later" : "first_launch", forKey: "codefluence.pendingLaunchKind")
         }
         preferences.set(true, forKey: "codefluence.decisionMade")
         preferences.set(true, forKey: "codefluence.accepted")
@@ -610,6 +658,7 @@ public final class Codefluence {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         }
         var payload: [String: Any] = ["clickToken": clickToken, "appUserId": appUserId]
+        payload["launchKind"] = preferences.string(forKey: "codefluence.pendingLaunchKind") ?? "first_launch"
         payload["purchaseAccountToken"] = purchaseAccountToken()
         stateLock.lock(); let source = transactionSource; stateLock.unlock()
         let baseRequest = request
@@ -643,6 +692,20 @@ public final class Codefluence {
                 self.gate.endRequest()
                 self.deliverMaybe(.success(leadId), completion)
                 self.reportPurchases()
+                return
+            } else if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), let data,
+                      let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], object["leadId"] is NSNull,
+                      object["reason"] as? String == "existing_users_not_included" {
+                self.clearPendingQueue()
+                self.stateLock.lock()
+                self.preferences.set(true, forKey: "codefluence.noTokenAtLaunch")
+                self.preferences.removeObject(forKey: "codefluence.decisionMade")
+                self.preferences.removeObject(forKey: "codefluence.accepted")
+                self.preferences.removeObject(forKey: "codefluence.laterLinkToken")
+                self.preferences.removeObject(forKey: "codefluence.clickToken")
+                self.stateLock.unlock()
+                self.gate.endRequest()
+                self.deliverMaybe(.failure(ExistingUsersNotIncluded()), completion)
                 return
             } else if let http = response as? HTTPURLResponse {
                 let classification = ConfirmationFailureClass.forStatus(http.statusCode)
@@ -727,6 +790,7 @@ public final class Codefluence {
         preferences.removeObject(forKey: "codefluence.pendingAppUserId")
         preferences.removeObject(forKey: "codefluence.pendingIdempotencyKey")
         preferences.removeObject(forKey: "codefluence.pendingAppTransactionJws")
+        preferences.removeObject(forKey: "codefluence.pendingLaunchKind")
         preferences.removeObject(forKey: "codefluence.pendingAttempts")
         retryScheduled = false
         stateLock.unlock()
@@ -738,6 +802,7 @@ public final class Codefluence {
         preferences.removeObject(forKey: "codefluence.pendingAppUserId")
         preferences.removeObject(forKey: "codefluence.pendingIdempotencyKey")
         preferences.removeObject(forKey: "codefluence.pendingAppTransactionJws")
+        preferences.removeObject(forKey: "codefluence.pendingLaunchKind")
         preferences.removeObject(forKey: "codefluence.pendingAttempts")
         retryScheduled = false
         stateLock.unlock()
@@ -925,3 +990,5 @@ final class ConfirmationGate {
     }
     func endRequest() { lock.lock(); requesting = false; lock.unlock() }
 }
+
+private struct ExistingUsersNotIncluded: Error {}

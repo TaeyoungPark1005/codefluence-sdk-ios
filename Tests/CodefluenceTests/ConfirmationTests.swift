@@ -132,7 +132,7 @@ final class ConfirmationTests: XCTestCase {
         let completed = expectation(description: "automatic unattributed start")
         sdk.autoConfirmIfAvailable(appUserId: "customer", clickToken: "") { result in
             XCTAssertNil(try? result.get())
-            XCTAssertTrue(self.preferences.bool(forKey: "codefluence.decisionMade"))
+            XCTAssertTrue(self.preferences.bool(forKey: "codefluence.noTokenAtLaunch"))
             XCTAssertFalse(self.preferences.bool(forKey: "codefluence.accepted"))
             completed.fulfill()
         }
@@ -214,25 +214,53 @@ final class ConfirmationTests: XCTestCase {
         XCTAssertEqual(preferences.string(forKey: "codefluence.pendingToken"), "accepted-token")
     }
 
-    func testNoTokenPersistsNoAttributionAndBlocksLaterTokenAfterRestart() {
+    @MainActor
+    func testSoftNoTokenRestoresOnlyThroughHandleAfterRestart() async throws {
         XCTAssertEqual(sdk.prepareConfirmation(for: nil), .noAttribution)
-        XCTAssertTrue(preferences.bool(forKey: "codefluence.decisionMade"))
+        XCTAssertFalse(preferences.bool(forKey: "codefluence.decisionMade"))
+        XCTAssertTrue(preferences.bool(forKey: "codefluence.noTokenAtLaunch"))
+        let restarted = Codefluence(publicKey: "pk_fixture", apiHost: URL(string: "https://sdk-test.invalid")!, preferences: preferences, session: session)
+        XCTAssertEqual(restarted.prepareConfirmation(for: "arbitrary-token"), .noAttribution)
+        XCTAssertTrue(restarted.handle(url: URL(string: "fixture://referral?cf_click_token=click.product.4102444800.signature")!))
+        let lead: String? = try await withCheckedThrowingContinuation { continuation in
+            restarted.autoConfirmIfAvailable(appUserId: "customer") { continuation.resume(with: $0) }
+        }
+        XCTAssertEqual(lead, "lead-fixture")
+        let captured = try XCTUnwrap(MockConfirmationProtocol.requests.first)
+        let payload = try JSONSerialization.jsonObject(with: captured.body) as! [String: String]
+        XCTAssertEqual(payload["launchKind"], "later")
+        XCTAssertTrue(restarted.handle(url: URL(string: "fixture://referral?cf_click_token=other.product.4102444800.signature")!))
+        XCTAssertEqual(MockConfirmationProtocol.requests.count, 1)
+    }
+
+    @MainActor
+    func testNullLeadReturnsToSoftStateWithoutRetry() async throws {
+        _ = sdk.prepareConfirmation(for: nil)
+        MockConfirmationProtocol.reply = { _ in (200, "{\"leadId\":null,\"reason\":\"existing_users_not_included\"}", 0) }
+        _ = sdk.handle(url: URL(string: "fixture://referral?cf_click_token=click.product.4102444800.signature")!)
+        let lead: String? = try await withCheckedThrowingContinuation { continuation in
+            sdk.autoConfirmIfAvailable(appUserId: "customer") { continuation.resume(with: $0) }
+        }
+        XCTAssertNil(lead)
+        XCTAssertFalse(preferences.bool(forKey: "codefluence.decisionMade"))
         XCTAssertFalse(preferences.bool(forKey: "codefluence.accepted"))
-        let restarted = Codefluence(publicKey: "pk_fixture", apiHost: URL(string: "https://sdk-test.invalid")!,
-                                    preferences: UserDefaults(suiteName: suite)!, session: session)
-        XCTAssertEqual(restarted.prepareConfirmation(for: "later-token"), .skip)
-        XCTAssertEqual(restarted.prepareConfirmation(for: nil), .skip)
-        let denied = expectation(description: "late token denied")
-        let retry = expectation(description: "no attribution cannot retry")
-        restarted.confirm(clickToken: "later-token", appUserId: "customer") { result in
-            if case .success = result { XCTFail("no attribution decision was bypassed") }
-            denied.fulfill()
-        }
-        restarted.retryPendingConfirmation { result in
-            if case .success = result { XCTFail("no attribution decision was retried") }
-            retry.fulfill()
-        }
-        wait(for: [denied, retry], timeout: 2)
+        XCTAssertNil(preferences.string(forKey: "codefluence.pendingToken"))
+        XCTAssertEqual(preferences.bool(forKey: "codefluence.noTokenAtLaunch"), true)
+        XCTAssertEqual(sdk.prepareConfirmation(for: nil), .noAttribution)
+    }
+
+    @MainActor
+    func testHandlePreservesExplicitDeclineAndPendingIdentity() {
+        preferences.set(true, forKey: "codefluence.decisionMade")
+        preferences.set(false, forKey: "codefluence.accepted")
+        XCTAssertTrue(sdk.handle(url: URL(string: "fixture://referral?cf_click_token=click.product.4102444800.signature")!))
+        XCTAssertNil(preferences.string(forKey: "codefluence.clickToken"))
+        XCTAssertEqual(sdk.prepareConfirmation(for: "click.product.4102444800.signature"), .skip)
+        preferences.removeObject(forKey: "codefluence.decisionMade")
+        preferences.set("pending", forKey: "codefluence.pendingAppUserId")
+        preferences.set("original", forKey: "codefluence.clickToken")
+        _ = sdk.handle(url: URL(string: "fixture://referral?cf_click_token=other.product.4102444800.signature")!)
+        XCTAssertEqual(preferences.string(forKey: "codefluence.clickToken"), "original")
         XCTAssertTrue(MockConfirmationProtocol.requests.isEmpty)
     }
 
@@ -439,7 +467,7 @@ extension ConfirmationTests {
         }
         XCTAssertNil(leadId)
         XCTAssertTrue(MockConfirmationProtocol.requests.isEmpty)
-        XCTAssertTrue(preferences.bool(forKey: "codefluence.decisionMade"))
+        XCTAssertTrue(preferences.bool(forKey: "codefluence.noTokenAtLaunch"))
     }
 }
 #endif
