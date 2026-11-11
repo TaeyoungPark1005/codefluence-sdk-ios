@@ -27,6 +27,30 @@ final class PrivacyManifestTests: XCTestCase {
         }
     }
 
+    /// 0.2.0: the daily activity signal (days of use, milestone names) and the App Attest proof are product interaction data
+    /// linked to the install. They are never used for tracking across apps.
+    func testPrivacyManifestDeclaresProductInteractionForActivitySignals() throws {
+        let manifest = try loadManifest()
+        let collected = try XCTUnwrap(manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        let entry = try XCTUnwrap(collected.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeProductInteraction" })
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypeTracking"] as? Bool, false)
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypePurposes"] as? [String], ["NSPrivacyCollectedDataTypePurposeDeveloperAdvertising"])
+        XCTAssertNil(manifest["NSPrivacyTrackingDomains"])
+        XCTAssertTrue(((manifest["NSPrivacyTracking"] as? Bool) ?? false) == false)
+    }
+
+    /// The ad revenue report (amount, currency, impression count per install) is information about the ads the user saw,
+    /// so it is declared as advertising data: linked, not tracking, developer's advertising.
+    func testPrivacyManifestDeclaresAdvertisingDataForAdRevenueReports() throws {
+        let manifest = try loadManifest()
+        let collected = try XCTUnwrap(manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        let entry = try XCTUnwrap(collected.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeAdvertisingData" })
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypeTracking"] as? Bool, false)
+        XCTAssertEqual(entry["NSPrivacyCollectedDataTypePurposes"] as? [String], ["NSPrivacyCollectedDataTypePurposeDeveloperAdvertising"])
+    }
+
     func testPrivacyManifestDeclaresUserDefaultsReasonCA921() throws {
         let manifest = try loadManifest()
         let apiTypes = try XCTUnwrap(manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]])

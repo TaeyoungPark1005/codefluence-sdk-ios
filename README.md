@@ -2,11 +2,11 @@
 
 The SDK validates copied referral URLs with `detectPatterns(for: [.probableWebURL])`; use `restoreReferralTokenAsync()` or `handleOpenURL(_:)` for `https://HOST/t/{token}` links. `purchaseAccountToken()` returns this install's stable UUID; pass it as `appAccountToken` when starting a purchase. Inject App Attest through `AttestationProvider` when calling `heartbeat` (one aggregate request per day).
 
-iOS 16+, Swift tools 5.9의 로컬 Swift Package입니다. 패키지에는 `UserDefaults` 사용을 선언하는 `PrivacyInfo.xcprivacy`가 포함됩니다. 공개 패키지 배포나 실제 설치·구매 검증을 의미하지 않습니다. 권장 흐름은 소개 토큰 복원 후 확인창 없이 `/track/confirm`을 호출하는 자동 귀속이며, 소개 코드 입력 UI는 없습니다. 기존 명시적 동의가 필요한 호스트는 `showConfirmationIfNeeded`를 사용할 수 있습니다.
+iOS 16+, Swift tools 5.9의 Swift Package입니다(공개 저장소 `https://github.com/TaeyoungPark1005/codefluence-sdk-ios`, 설치는 아래 「설치」). 패키지에는 `UserDefaults` 접근 사유와 수집 데이터 4종(구매 내역·사용자 ID·제품 상호작용·광고 데이터)을 선언하는 `PrivacyInfo.xcprivacy`가 포함됩니다. 항목별 App Store·Google Play 표기 안내는 서버의 `/docs#store-privacy`에 있습니다. 권장 흐름은 소개 토큰 복원 후 확인창 없이 `/track/confirm`을 호출하는 자동 귀속이며, 소개 코드 입력 UI는 없습니다. 기존 명시적 동의가 필요한 호스트는 `showConfirmationIfNeeded`를 사용할 수 있습니다.
 
 ## PrivacyInfo와 Required Reason API
 
-`PrivacyInfo.xcprivacy`는 `NSPrivacyAccessedAPICategoryUserDefaults`의 사유 `CA92.1`(앱 그룹 등 외부와 공유하지 않는, 앱 자신의 `UserDefaults` 접근)만 선언합니다. SDK는 소개 결정·대기 큐·심장박동 날짜를 자신의 `UserDefaults` suite에만 저장하므로 이 사유가 정확합니다.
+`PrivacyInfo.xcprivacy`의 Required Reason API 선언은 `NSPrivacyAccessedAPICategoryUserDefaults`의 사유 `CA92.1`(앱 그룹 등 외부와 공유하지 않는, 앱 자신의 `UserDefaults` 접근)만 선언합니다. SDK는 소개 결정·대기 큐·심장박동 날짜를 자신의 `UserDefaults` suite에만 저장하므로 이 사유가 정확합니다.
 
 **UIPasteboard Required Reason API 대상 여부 — 대상 아님.** Apple의 Required Reason API는 다섯 범주(File timestamp, System boot time, Disk space, Active keyboard, User defaults)로 고정되어 있고 `UIPasteboard`는 어느 범주에도 포함되지 않습니다. 따라서 `NSPrivacyAccessedAPITypes`에 pasteboard 선언을 추가하지 않습니다. 클립보드는 별도의 프라이버시 메커니즘(시스템 붙여넣기 알림)으로 다루며, SDK는 값을 읽기 전에 `detectPatterns(for: [.probableWebURL])`로 존재만 확인해 일반 설치자에게 붙여넣기 알림을 띄우지 않습니다.
 
@@ -47,7 +47,7 @@ Swift Package 매니페스트에서는:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.1.3")
+    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.2.0")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -196,6 +196,38 @@ Codefluence.shared.subscriptionStatus { result in
 ```
 
 `/track/confirm`에서 저장한 `leadId`와 `purchaseAccountToken`으로 `POST {apiHost}/track/subscription`(`Authorization: Bearer pk_...`)을 호출합니다. 저장값이 없으면 `noSubscriptionReference`, 서버 404는 `subscriptionNotFound`를 반환합니다. 알 수 없는 event type은 `kind`가 `nil`이고 `rawType`에 원문을 보존합니다.
+
+## 활동 신호와 `trackMilestone` (0.2.0)
+
+개발자 서버가 없는 앱의 활성 사용자 보상을 위해 SDK가 확인된 소개 설치에 묶인 **하루 한 번의 활동 신호**를 App Attest 증명과 함께 보냅니다(설계 `docs/superpowers/specs/2026-11-10-activation-reward-design.md` §4.3, 서버 계약 `docs/SPEC.md` §29).
+
+- **서버 플래그가 꺼져 있으면 아무것도 보내지 않습니다.** 먼저 `GET /track/signal-config`에 공개 키만 보내 기능 상태를 묻고(6시간 캐시), 켜져 있고 이 설치가 소개로 온 활성 보상 설치일 때만 challenge → 증명 → 신호 순서로 보냅니다. 앱은 `start`/`resume()` 때 자동으로 시도합니다.
+- 시뮬레이터와 App Attest를 지원하지 않는 환경(대부분의 앱 확장 포함)에서는 보내지 않습니다. 증명 실패, 네트워크 오류, 서버 거절은 모두 `.skipped(reason:)`로 끝나며 예외나 크래시를 내지 않습니다. 하루 시도는 3회로 제한합니다.
+- `Codefluence.shared.trackMilestone("onboarded")`: 캠페인이 정한 완료 행동이 있을 때 그 이름을 서명된 신호에 실어 보냅니다. 이름은 영문자·숫자·`_ . -` 40자 이하이고 그 밖의 값은 무시합니다.
+- **앱에서 할 일:** Signing & Capabilities에 App Attest를 추가하고(entitlement `com.apple.developer.devicecheck.appattest-environment`, 개발 빌드는 `development`, 배포는 `production`) 제품 설정에 Apple 팀 ID를 입력합니다. 광고 ID와 ATT는 쓰지 않습니다.
+- PrivacyInfo.xcprivacy에 광고 데이터(`NSPrivacyCollectedDataTypeAdvertisingData`, 광고 수익 보고의 금액·통화·노출 수, 연결됨, 추적 아님, 개발자 광고)와 제품 상호작용(`NSPrivacyCollectedDataTypeProductInteraction`, 연결됨, 추적 아님, 개발자 광고)을 선언했습니다. App Store Connect의 앱 개인정보에도 같은 항목을 반영하세요(항목별 표는 `/docs#store-privacy`). 근거: https://developer.apple.com/documentation/bundleresources/privacy-manifest-files/describing-data-use-in-privacy-manifests
+- App Attest 공식 문서: https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity
+
+## 광고 수익 보고 (`reportAdRevenue`, 0.2.0)
+
+광고 수익 보상 캠페인을 쓰는 앱은 AdMob의 노출 단위 수익(paid event) 값을 SDK로 넘깁니다. SDK가 기기에서 합산해 **한 시간에 한 번 이하**로 묶어 보냅니다(설계 `docs/SPEC.md` §26, 서버 계약 §26.2).
+
+```swift
+// 광고 형식마다 광고 객체를 받자마자, 보여 주기 전에 처리기를 붙입니다.
+ad.paidEventHandler = { adValue in
+    Codefluence.shared.reportAdRevenue(
+        value: adValue.value as Decimal,
+        currencyCode: adValue.currencyCode,
+        precision: adValue.precision == .precise ? .precise : adValue.precision == .estimated ? .estimated : adValue.precision == .publisherProvided ? .publisherProvided : .unknown)
+}
+```
+
+- `precision: .unknown`(테스트 광고 등)은 노출 수만 세고 수익은 더하지 않습니다. 통화는 KRW·USD·JPY·EUR만 받고 그 밖의 값과 음수는 무시합니다.
+- **서버가 광고 수익을 켜기 전에는 아무것도 보내지 않습니다.** 먼저 `GET /track/signal-config`에 공개 키만 보내 `adRevenue: true`인지 묻고(6시간 캐시), 아니면 값은 기기에 남습니다.
+- 소개로 온 설치는 App Attest 증명과 함께 보내며 서버가 서명한 요청 원문(`challenge\n통화,값,노출,미확정노출`)을 다시 만들어 확인합니다. 증명이 통과한 값만 크리에이터 몫 계산에 쓰입니다. 소개 기간이 끝났거나 증명을 쓸 수 없는 환경에서는 **식별자 없이 합계만** 보내며 이 값은 지급 근거가 아니라 분모(앱 전체 SDK 합계)에만 쓰입니다.
+- 보내는 것은 금액(마이크로 단위)·통화·노출 수뿐입니다. 광고 ID(IDFA)와 ATT는 쓰지 않습니다. 429는 한 시간 쉬었다가 다시 보내고, 실패한 묶음은 기기에 남겨 다음에 보냅니다.
+- 호출은 AdMob 처리기 안에서 바로 하세요. SDK는 앱 시작 때도 남은 값을 보냅니다. 예외나 크래시를 내지 않습니다.
+- 공식 문서: https://developers.google.com/admob/ios/impression-level-ad-revenue (Google Mobile Ads SDK 9.10.0 이상, AdMob 화면에서 노출 단위 수익 켜기 필요)
 
 ## 로컬 검증
 

@@ -8,12 +8,12 @@ import UIKit
 
 public final class Codefluence {
     public static let shared = Codefluence()
-    private var publicKey: String = ""
-    private var apiHost: URL?
-    private let stateLock = NSLock()
+    var publicKey: String = ""
+    var apiHost: URL?
+    let stateLock = NSLock()
     private let gate = ConfirmationGate()
-    private let preferences: UserDefaults
-    private let session: URLSession
+    let preferences: UserDefaults
+    let session: URLSession
 
     // A3 automatic retry dependencies. Defaults use real time/jitter/monitor;
     // tests inject deterministic values. Guarded by `stateLock`.
@@ -51,6 +51,17 @@ public final class Codefluence {
     }
     /// Where App Store data comes from. Package tests inject a fake.
     var transactionSource: StoreTransactionSource = EmptyStoreTransactionSource()
+    /// App Attest (daily activity signal). Package tests inject a fake; extensions and the simulator get the unsupported stub.
+    var appAttest: CodefluenceAppAttest = Codefluence.defaultAppAttest()
+    /// Time source for the daily signal gate. Tests inject a fixed clock.
+    var signalClock: () -> Date = { Date() }
+    static func defaultAppAttest() -> CodefluenceAppAttest {
+        #if canImport(DeviceCheck)
+        return SystemAppAttest()
+        #else
+        return UnsupportedAppAttest()
+        #endif
+    }
     /// Upper bound for reading the AppTransaction before a confirmation is sent without it.
     var appTransactionTimeout: TimeInterval = 2.5
     /// One purchase report at a time; overlapping calls (launch, confirm, purchase callback) return 0.
@@ -106,11 +117,13 @@ public final class Codefluence {
         shared.startNetworkMonitorIfNeeded()
         shared.resumePendingConfirmationIfNeeded()
         // Purchases made while the app was closed or by another purchase SDK are reported on launch.
-        if shared.preferences.string(forKey: "codefluence.confirmedLeadId") != nil { shared.reportPurchases() }
+        if shared.preferences.string(forKey: "codefluence.confirmedLeadId") != nil { shared.reportPurchases(); shared.sendActivitySignalIfNeeded() }
+        // Ad revenue the host forwarded earlier (paid events) is sent on launch too. The server gate decides whether anything leaves the device.
+        shared.flushAdRevenueIfNeeded()
     }
 
     /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
-    public static let version = "0.1.3"
+    public static let version = "0.2.0"
 
     /// Info.plist의 URL Types에 등록된 스킴. 테스트가 바꿉니다.
     var registeredURLSchemes: () -> [String] = {
@@ -277,7 +290,7 @@ public final class Codefluence {
     public func resume() {
         stateLock.lock(); let provider = appUserIdProvider; stateLock.unlock()
         guard let id = provider?(), !id.isEmpty else { return }
-        autoConfirmIfAvailable(appUserId: id) { [weak self] _ in self?.reportIfReferred() }
+        autoConfirmIfAvailable(appUserId: id) { [weak self] _ in self?.reportIfReferred(); self?.sendActivitySignalIfNeeded() }
     }
 
     /// Call after a purchase succeeds, with any purchase SDK. Reports the store transaction when
