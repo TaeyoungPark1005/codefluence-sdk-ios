@@ -66,7 +66,7 @@ final class ValidateTests: XCTestCase {
         _ = run(makeSDK())
         let body = ValidateMockProtocol.requests.first { $0.path == "/sdk/heartbeat" }?.body
         XCTAssertEqual(body?["build"] as? String, expectedBuild, "점검 신호가 개발 빌드인지 서버가 알아야 운영 집계에서 뺀다")
-        XCTAssertEqual(body?["sdkVersion"] as? String, "0.2.1")
+        XCTAssertEqual(body?["sdkVersion"] as? String, "0.2.2")
     }
 
     func testBuildCheckTellsWhetherSignalsCountInProduction() {

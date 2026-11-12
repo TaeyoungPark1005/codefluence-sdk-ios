@@ -48,6 +48,8 @@ public final class Codefluence {
         #if canImport(StoreKit)
         transactionSource = SystemStoreTransactionSource()
         #endif
+        // 미전송 구매는 백업에서 제외한 파일에 둔다(다른 기기로 복제되지 않게).
+        if let file = FilePurchaseQueueStore.makeDefault() { purchaseQueueStore = file }
     }
     /// Where App Store data comes from. Package tests inject a fake.
     var transactionSource: StoreTransactionSource = EmptyStoreTransactionSource()
@@ -66,6 +68,15 @@ public final class Codefluence {
     var appTransactionTimeout: TimeInterval = 2.5
     /// One purchase report at a time; overlapping calls (launch, confirm, purchase callback) return 0.
     private var reportInFlight = false
+    /// 미전송 구매 큐(0.2.2). 패키지 테스트는 메모리 저장소를 쓰고, 앱(`shared`)은 백업 제외 파일을 쓴다. `stateLock` 안에서만 읽고 쓴다.
+    var purchaseQueueStore: PurchaseQueueStore = InMemoryPurchaseQueueStore()
+    /// 구매 큐의 시각. 테스트가 고정한다.
+    var purchaseClock: () -> Date = { Date() }
+    private var purchaseFlushInFlight = false
+    private var purchaseFlushAgain = false
+    private var purchaseRetryScheduled = false
+    /// 이번 실행에서 읽은 AppTransaction JWS. 설치마다 같으므로 한 번 읽으면 다시 읽지 않는다.
+    private var cachedAppTransactionJWS: String?
     /// Host-provided stable customer ID for the one-call helper (`start`). Guarded by `stateLock`.
     private var appUserIdProvider: (() -> String?)?
     private var foregroundObserver: NSObjectProtocol?
@@ -123,7 +134,7 @@ public final class Codefluence {
     }
 
     /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
-    public static let version = "0.2.1"
+    public static let version = "0.2.2"
 
     /// 이 빌드의 종류(`"debug"` 또는 `"release"`). 모든 서버 요청의 `build` 필드로 실립니다.
     /// Swift Package는 호스트 앱과 같은 구성으로 컴파일되므로 Debug 구성(`DEBUG`)이거나 시뮬레이터면 `"debug"`입니다.
@@ -324,6 +335,48 @@ public final class Codefluence {
         reportIfReferred()
     }
 
+    /// 결제 직후 거래를 직접 넘깁니다(0.2.2). `jws`는 StoreKit 2 거래의 서명 문자열입니다:
+    /// `VerificationResult<Transaction>.jwsRepresentation`, RevenueCat이면 `StoreTransaction.jwsRepresentation`.
+    /// 받은 즉시 기기에 저장하고 보내며, 서버가 받을 때까지(네트워크 오류·서버 오류·결제 조회 키 미등록) 앱 시작·전면 전환·
+    /// 네트워크 복구 때 다시 보냅니다. 다른 결제 SDK가 소모성 거래를 먼저 끝내(`finish`) 스토어 목록에 남지 않아도 빠지지 않습니다.
+    /// 소개로 온 설치(확인 완료 또는 확인 대기)에서만 저장하고, 소개와 무관한 설치는 아무것도 저장·전송하지 않습니다.
+    /// completion은 이번에 서버가 받아들인 거래 수입니다(메인 스레드).
+    public func purchaseCompleted(jws: String, completion: ((Result<Int, Error>) -> Void)? = nil) {
+        let trimmed = jws.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { deliverCount(.success(0), completion); return }
+        guard enqueuePurchases([trimmed]) else { deliverCount(.success(0), completion); return }
+        flushPurchaseQueue(completion: completion)
+    }
+
+    #if canImport(ObjectiveC)
+    /// RevenueCat 결제 결과의 `transaction`(`StoreTransaction`)을 그대로 넘깁니다(0.2.2).
+    /// RevenueCat iOS 5.x는 거래 JWS를 공개 API로 내주지 않고 Objective-C 속성 `jwsRepresentation`으로만 노출합니다(5.81.2 소스 확인).
+    /// SDK는 그 속성이 있을 때만 읽어 `purchaseCompleted(jws:)`로 보내고, 없거나 nil이면(StoreKit 1 경로, 구버전·이후 버전에서 이름이 바뀐 경우)
+    /// `purchaseCompleted()`처럼 스토어 목록을 다시 읽습니다. 어떤 경우에도 앱을 멈추지 않습니다.
+    public func purchaseCompleted(storeTransaction: NSObject?, completion: ((Result<Int, Error>) -> Void)? = nil) {
+        if let jws = Self.jwsRepresentation(of: storeTransaction) { purchaseCompleted(jws: jws, completion: completion); return }
+        guard isReferralInstall() else { deliverCount(.success(0), completion); return }
+        reportPurchases(completion: completion)
+    }
+
+    /// `jwsRepresentation` Objective-C 속성이 있으면 그 값. 없는 키를 KVC로 읽으면 예외가 나므로 `responds(to:)`로 먼저 확인한다.
+    static func jwsRepresentation(of object: NSObject?) -> String? {
+        let selector = NSSelectorFromString("jwsRepresentation")
+        guard let object, object.responds(to: selector),
+              let value = object.perform(selector)?.takeUnretainedValue() as? String,
+              !value.isEmpty else { return nil }
+        return value
+    }
+    #endif
+
+    #if canImport(StoreKit)
+    /// `purchaseCompleted(jws:)`와 같고, StoreKit 2 결제 결과(`Product.purchase`·`Transaction.updates`가 주는 값)를 그대로 받습니다.
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *)
+    public func purchaseCompleted(transaction result: VerificationResult<StoreKit.Transaction>, completion: ((Result<Int, Error>) -> Void)? = nil) {
+        purchaseCompleted(jws: result.jwsRepresentation, completion: completion)
+    }
+    #endif
+
     private func reportIfReferred() {
         guard preferences.string(forKey: "codefluence.confirmedLeadId") != nil else { return }
         reportPurchases()
@@ -342,13 +395,14 @@ public final class Codefluence {
         stateLock.unlock()
     }
 
-    private func startNetworkMonitorIfNeeded() {
+    func startNetworkMonitorIfNeeded() {
         stateLock.lock()
         guard !monitorStarted, let monitor = networkMonitor else { stateLock.unlock(); return }
         monitorStarted = true
         stateLock.unlock()
         monitor.start(onSatisfied: { [weak self] in
             self?.resumePendingConfirmationIfNeeded()
+            self?.flushPurchaseQueue()
         })
     }
 
@@ -435,9 +489,24 @@ public final class Codefluence {
 
     private func reportPurchaseJWS(_ jws: String, completion: ((Result<Void, Error>) -> Void)?) {
         stateLock.lock(); let host = apiHost; let key = publicKey; stateLock.unlock()
-        guard let host, key.hasPrefix("pk_"), let url = URL(string: host.absoluteString + "/track/purchase") else { completion?(.failure(failure(11, "SDK is not configured"))); return }
-        var request = URLRequest(url: url); request.httpMethod = "POST"; request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": jws, "build": Codefluence.build])
-        session.dataTask(with: request) { [weak self] _, response, error in guard let self else { return }; let result: Result<Void, Error> = error.map { .failure($0) } ?? (((response as? HTTPURLResponse)?.statusCode ?? 500) < 300 ? .success(()) : .failure(self.failure(1, "Purchase report failed"))); self.deliverVoid(result, completion) }.resume()
+        guard let host, key.hasPrefix("pk_"), purchaseURL(host) != nil else { completion?(.failure(failure(11, "SDK is not configured"))); return }
+        // 소개로 온 설치면 큐를 거친다(실패해도 기기에 남아 다시 보내진다). 아니면 예전처럼 한 번만 보낸다.
+        if enqueuePurchases([jws]) {
+            let key = PurchaseQueueRules.key(forJWS: jws)
+            flushPurchaseQueue { [weak self] _ in
+                guard let self else { return }
+                self.stateLock.lock()
+                let done = (self.preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? []).contains(key)
+                self.stateLock.unlock()
+                self.deliverVoid(done ? .success(()) : .failure(self.failure(1, "Purchase report failed")), completion)
+            }
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let status = await self.sendPurchase(jws: jws, host: host, key: key, appTransaction: await self.appTransactionForReport())
+            self.deliverVoid(status.map { (200..<300).contains($0) } == true ? .success(()) : .failure(self.failure(1, "Purchase report failed")), completion)
+        }
     }
     private func deliverVoid(_ result: Result<Void, Error>, _ completion: ((Result<Void, Error>) -> Void)?) { guard let completion else { return }; DispatchQueue.main.async { completion(result) } }
 
@@ -770,9 +839,12 @@ public final class Codefluence {
     /// purchase succeeds (including purchases made through RevenueCat or other purchase SDKs);
     /// it also runs on launch and right after a referral is confirmed. Completion gets the number
     /// of transactions the server accepted (including ones it already had).
+    ///
+    /// 0.2.2: 소개로 온 설치는 읽은 거래를 먼저 기기 큐에 넣고 보내므로, 서버가 받지 못한 거래는 스토어 목록에서 사라져도 다시 보내집니다.
+    /// 소모성 거래를 다른 결제 SDK가 먼저 끝내면 iOS 17 이하의 `Transaction.all`에 나오지 않으니 `purchaseCompleted(jws:)`를 쓰세요.
     public func reportPurchases(completion: ((Result<Int, Error>) -> Void)? = nil) {
         stateLock.lock(); let host = apiHost; let key = publicKey; let source = transactionSource; stateLock.unlock()
-        guard let host, key.hasPrefix("pk_"), let url = URL(string: host.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/track/purchase") else {
+        guard let host, key.hasPrefix("pk_"), purchaseURL(host) != nil else {
             deliverCount(.failure(failure(11, "SDK is not configured")), completion); return
         }
         stateLock.lock()
@@ -781,27 +853,191 @@ public final class Codefluence {
         stateLock.unlock()
         Task { [weak self] in
             guard let self else { return }
-            defer { self.stateLock.lock(); self.reportInFlight = false; self.stateLock.unlock() }
-            let reported = Set(self.preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? [])
+            let reported = Set(self.reportedTransactionIds())
             let pending = await source.signedTransactions().filter { !reported.contains($0.transactionId) }
+            if self.isReferralInstall() {
+                _ = self.enqueuePurchases(pending.map { $0.jws })
+                self.endPurchaseScan()
+                self.flushPurchaseQueue(completion: completion)
+                return
+            }
+            // 소개와 무관한 설치(또는 직접 부른 경우): 큐에 넣지 않고 예전처럼 한 번씩만 보낸다.
+            let appTransaction = pending.isEmpty ? nil : await self.appTransactionForReport()
             var accepted: [String] = []
             for transaction in pending {
-                var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
-                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": transaction.jws, "build": Codefluence.build])
-                if let (_, response) = try? await self.session.data(for: request), let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) {
+                if let status = await self.sendPurchase(jws: transaction.jws, host: host, key: key, appTransaction: appTransaction), (200..<300).contains(status) {
                     accepted.append(transaction.transactionId)
                 }
             }
-            if !accepted.isEmpty {
-                self.stateLock.lock()
-                let merged = (self.preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? []) + accepted
-                self.preferences.set(Array(merged.suffix(200)), forKey: "codefluence.reportedTransactionIds")
-                self.stateLock.unlock()
-            }
+            self.markReported(accepted)
+            self.endPurchaseScan()
             self.deliverCount(.success(accepted.count), completion)
         }
     }
+
+    // MARK: - 미전송 구매 큐 (0.2.2)
+
+    private func purchaseURL(_ host: URL) -> URL? {
+        URL(string: host.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/track/purchase")
+    }
+
+    /// 확인이 끝났거나, 사용자가 받아들인 확인이 아직 서버에 닿지 않은 설치.
+    func isReferralInstall() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return isReferralInstallLocked()
+    }
+
+    private func isReferralInstallLocked() -> Bool {
+        if preferences.string(forKey: "codefluence.confirmedLeadId")?.isEmpty == false { return true }
+        return preferences.bool(forKey: "codefluence.accepted") && preferences.string(forKey: "codefluence.pendingToken")?.isEmpty == false
+    }
+
+    private func reportedTransactionIds() -> [String] {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? []
+    }
+
+    private func markReported(_ keys: [String]) {
+        guard !keys.isEmpty else { return }
+        stateLock.lock()
+        let merged = (preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? []) + keys
+        preferences.set(Array(merged.suffix(200)), forKey: "codefluence.reportedTransactionIds")
+        stateLock.unlock()
+    }
+
+    /// 지금 큐에 있는 구매. 테스트와 진단용.
+    func queuedPurchases() -> [QueuedPurchase] {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return purchaseQueueStore.load()
+    }
+
+    /// 소개로 온 설치면 거래를 큐에 넣고 true. 아니면 아무것도 저장하지 않고 false.
+    @discardableResult
+    func enqueuePurchases(_ jwsList: [String]) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard isReferralInstallLocked() else { return false }
+        let now = purchaseClock().timeIntervalSince1970
+        let reported = Set(preferences.stringArray(forKey: "codefluence.reportedTransactionIds") ?? [])
+        var records = purchaseQueueStore.load()
+        for jws in jwsList where !jws.isEmpty {
+            records = PurchaseQueueRules.enqueue(records, key: PurchaseQueueRules.key(forJWS: jws), jws: jws, now: now, reported: reported)
+        }
+        purchaseQueueStore.save(PurchaseQueueRules.pruned(records, now: now))
+        return true
+    }
+
+    /// 보낼 때가 된 큐의 구매를 보낸다. 앱 시작·전면 전환(`reportPurchases`)·네트워크 복구·예약된 재시도·결제 직후에 돈다.
+    /// 확인이 끝나기 전에는 보내지 않고 기다리며, 소개가 사라졌으면(거절·영구 실패) 큐를 비운다.
+    func flushPurchaseQueue(completion: ((Result<Int, Error>) -> Void)? = nil) {
+        stateLock.lock()
+        let host = apiHost; let key = publicKey
+        if purchaseFlushInFlight { purchaseFlushAgain = true; stateLock.unlock(); deliverCount(.success(0), completion); return }
+        guard let host, key.hasPrefix("pk_"), purchaseURL(host) != nil else {
+            stateLock.unlock(); deliverCount(.failure(failure(11, "SDK is not configured")), completion); return
+        }
+        let now = purchaseClock().timeIntervalSince1970
+        var records = PurchaseQueueRules.pruned(purchaseQueueStore.load(), now: now)
+        let confirmed = preferences.string(forKey: "codefluence.confirmedLeadId")?.isEmpty == false
+        if !isReferralInstallLocked() { records = [] }
+        purchaseQueueStore.save(records)
+        let due = confirmed ? records.filter { $0.nextAttemptAt <= now } : []
+        if due.isEmpty { stateLock.unlock(); deliverCount(.success(0), completion); return }
+        purchaseFlushInFlight = true
+        stateLock.unlock()
+        Task { [weak self] in
+            guard let self else { return }
+            let appTransaction = await self.appTransactionForReport()
+            var accepted = 0
+            for record in due {
+                let status = await self.sendPurchase(jws: record.jws, host: host, key: key, appTransaction: appTransaction)
+                let outcome = PurchaseReportOutcome.forStatus(status)
+                if outcome == .accepted { accepted += 1 }
+                self.applyPurchaseOutcome(outcome, to: record.key)
+            }
+            let again = self.endPurchaseFlush()
+            self.schedulePurchaseRetryIfNeeded()
+            self.deliverCount(.success(accepted), completion)
+            if again { self.flushPurchaseQueue() }
+        }
+    }
+
+    private func endPurchaseScan() { stateLock.lock(); reportInFlight = false; stateLock.unlock() }
+
+    /// 비우기를 끝내고, 도는 동안 다시 요청이 있었는지 돌려준다.
+    private func endPurchaseFlush() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        purchaseFlushInFlight = false
+        let again = purchaseFlushAgain; purchaseFlushAgain = false
+        return again
+    }
+
+    private func applyPurchaseOutcome(_ outcome: PurchaseReportOutcome, to key: String) {
+        stateLock.lock()
+        let now = purchaseClock().timeIntervalSince1970
+        var records = purchaseQueueStore.load()
+        switch outcome {
+        case .accepted, .drop:
+            records.removeAll { $0.key == key }
+        case .retry, .retryLater:
+            if let index = records.firstIndex(where: { $0.key == key }) {
+                records[index].attempts += 1
+                records[index].nextAttemptAt = PurchaseQueueRules.nextAttempt(after: outcome, attempts: records[index].attempts, now: now, jitter: jitterProvider())
+            }
+        }
+        purchaseQueueStore.save(records)
+        stateLock.unlock()
+        if outcome == .accepted { markReported([key]) }
+    }
+
+    /// 이번 실행 안에서 가장 이른 다음 시도에 맞춰 한 번 더 비운다. 앱이 그 전에 꺼지면 다음 시작이 이어 받는다.
+    private func schedulePurchaseRetryIfNeeded() {
+        stateLock.lock()
+        let now = purchaseClock().timeIntervalSince1970
+        guard !purchaseRetryScheduled,
+              preferences.string(forKey: "codefluence.confirmedLeadId")?.isEmpty == false,
+              let next = purchaseQueueStore.load().map(\.nextAttemptAt).min() else { stateLock.unlock(); return }
+        purchaseRetryScheduled = true
+        let scheduler = self.scheduler
+        stateLock.unlock()
+        scheduler(max(0, next - now)) { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock(); self.purchaseRetryScheduled = false; self.stateLock.unlock()
+            self.flushPurchaseQueue()
+        }
+    }
+
+    /// 구매 보고 한 건. 본문은 `signedTransaction`·`build`, 그리고 얻을 수 있으면 `appTransaction`(Apple 서명 AppTransaction JWS).
+    /// `appTransaction`은 확인 때 서버에 결제 조회 키가 없어 lead에 묶이지 못한 AppTransaction을 다시 보내는 선택 필드다(구버전 서버는 무시한다).
+    /// HTTP 상태를 돌려주고, 응답이 없으면 nil.
+    private func sendPurchase(jws: String, host: URL, key: String, appTransaction: String?) async -> Int? {
+        guard let url = purchaseURL(host) else { return nil }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: Self.purchaseBody(jws: jws, appTransaction: appTransaction))
+        guard let (_, response) = try? await session.data(for: request) else { return nil }
+        return (response as? HTTPURLResponse)?.statusCode
+    }
+
+    static func purchaseBody(jws: String, appTransaction: String?) -> [String: Any] {
+        var body: [String: Any] = ["signedTransaction": jws, "build": Codefluence.build]
+        if let appTransaction, !appTransaction.isEmpty { body["appTransaction"] = appTransaction }
+        return body
+    }
+
+    private func appTransactionForReport() async -> String? {
+        let (cached, source, timeout) = appTransactionInputs()
+        if let cached { return cached }
+        let value = await Self.firstOrNil(timeout: timeout, { await source.appTransactionJWS() })
+        if let value, !value.isEmpty { cacheAppTransaction(value) }
+        return value
+    }
+
+    private func appTransactionInputs() -> (String?, StoreTransactionSource, TimeInterval) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return (cachedAppTransactionJWS, transactionSource, appTransactionTimeout)
+    }
+
+    private func cacheAppTransaction(_ value: String) { stateLock.lock(); cachedAppTransactionJWS = value; stateLock.unlock() }
     private func deliverCount(_ result: Result<Int, Error>, _ completion: ((Result<Int, Error>) -> Void)?) { guard let completion else { return }; DispatchQueue.main.async { completion(result) } }
 
     /// Returns the operation's value, or nil if it doesn't finish within `timeout`.

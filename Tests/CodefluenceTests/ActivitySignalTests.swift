@@ -200,5 +200,5 @@ final class ActivitySignalTests: XCTestCase {
         XCTAssertEqual(Codefluence.kstDay(Date(timeIntervalSince1970: 1_790_040_000)), "2026-09-22")
     }
 
-    func testSdkVersionIs021() { XCTAssertEqual(Codefluence.version, "0.2.1") }
+    func testSdkVersionIs022() { XCTAssertEqual(Codefluence.version, "0.2.2") }
 }

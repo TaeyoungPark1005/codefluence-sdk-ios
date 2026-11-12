@@ -6,7 +6,7 @@ iOS 16+, Swift tools 5.9의 Swift Package입니다(공개 저장소 `https://git
 
 ## PrivacyInfo와 Required Reason API
 
-`PrivacyInfo.xcprivacy`의 Required Reason API 선언은 `NSPrivacyAccessedAPICategoryUserDefaults`의 사유 `CA92.1`(앱 그룹 등 외부와 공유하지 않는, 앱 자신의 `UserDefaults` 접근)만 선언합니다. SDK는 소개 결정·대기 큐·심장박동 날짜를 자신의 `UserDefaults` suite에만 저장하므로 이 사유가 정확합니다.
+`PrivacyInfo.xcprivacy`의 Required Reason API 선언은 `NSPrivacyAccessedAPICategoryUserDefaults`의 사유 `CA92.1`(앱 그룹 등 외부와 공유하지 않는, 앱 자신의 `UserDefaults` 접근)만 선언합니다. SDK는 소개 결정·대기 큐·심장박동 날짜를 자신의 `UserDefaults` suite에만 저장하므로 이 사유가 정확합니다. 0.2.2의 미전송 구매 큐는 `UserDefaults`가 아니라 앱의 `Application Support/Codefluence/purchase-queue.json` 파일(백업 제외)에 두며, 파일 읽기·쓰기는 Required Reason API 범주가 아닙니다(파일 시각·디스크 용량 API는 쓰지 않습니다).
 
 **UIPasteboard Required Reason API 대상 여부 — 대상 아님.** Apple의 Required Reason API는 다섯 범주(File timestamp, System boot time, Disk space, Active keyboard, User defaults)로 고정되어 있고 `UIPasteboard`는 어느 범주에도 포함되지 않습니다. 따라서 `NSPrivacyAccessedAPITypes`에 pasteboard 선언을 추가하지 않습니다. 클립보드는 별도의 프라이버시 메커니즘(시스템 붙여넣기 알림)으로 다루며, SDK는 값을 읽기 전에 `detectPatterns(for: [.probableWebURL])`로 존재만 확인해 일반 설치자에게 붙여넣기 알림을 띄우지 않습니다.
 
@@ -31,6 +31,10 @@ Codefluence.start(publicKey: "pk_...", apiHost: URL(string: "https://YOUR_CODEFL
 
 Codefluence.shared.resume()            // 사용자 ID가 뒤늦게 정해졌을 때
 Codefluence.shared.purchaseCompleted() // 결제가 끝났을 때(어떤 구매 SDK든)
+
+// 0.2.2 권장: 결제 직후 거래를 직접 넘깁니다(소모성 결제가 빠지지 않습니다. 아래 「미전송 구매 큐」).
+Codefluence.shared.purchaseCompleted(transaction: verification)          // StoreKit 2 `Product.purchase()` 결과
+Codefluence.shared.purchaseCompleted(storeTransaction: result.transaction) // RevenueCat `purchase(package:)` 결과
 ```
 
 `start`는 `configure`를 부르고, 딥링크가 시작이나 사용자 ID보다 먼저·나중에 와도 토큰을 보관했다가 ID가 정해지면 확인합니다. 시작 직후 소개 링크가 없다는 판단(귀속 없음 확정)은 1초 유예 뒤에 하므로 콜드 스타트 딥링크가 사라지지 않습니다. 앱이 전면으로 올 때마다 `resume()`을 자동으로 부릅니다. `purchaseCompleted()`는 소개로 온 설치에서만 결제를 보고합니다. 앱의 URL 스킴(URL Types)은 호스트 앱이 등록하고 대시보드 제품 화면의 「앱 열기 스킴」에도 같은 값을 저장하세요. 아래 개별 호출(`configure`, `autoConfirmIfAvailable`, `reportPurchases` 등)은 세밀한 제어가 필요할 때만 씁니다.
@@ -47,7 +51,7 @@ Swift Package 매니페스트에서는:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.2.1")
+    .package(url: "https://github.com/TaeyoungPark1005/codefluence-sdk-ios", from: "0.2.2")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -247,9 +251,54 @@ xcodebuild -scheme Codefluence -destination 'generic/platform=iOS Simulator' \
 
 RevenueCat 등 어떤 결제 SDK로 결제했든, 결제 성공 뒤 `Codefluence.shared.reportPurchases()`를 부르면 SDK가 `Transaction.all`에서 아직 보고하지 않은 Apple 서명 거래를 읽어 `/track/purchase`로 보냅니다. 앱 시작(`configure`)과 소개 확인 직후에도 자동으로 돕니다. 소개 확인 때는 Apple 서명 `AppTransaction`을 함께 보내, 서버가 이후 거래를 `appTransactionId`로 소개에 연결합니다(iOS 16+).
 
-- 소모성 상품은 Info.plist에 `SKIncludeConsumableInAppPurchaseHistory = YES`가 있어야 처리 완료 뒤에도 거래가 보입니다.
+- 소모성 상품은 Info.plist에 `SKIncludeConsumableInAppPurchaseHistory = YES`가 있어야 처리 완료 뒤에도 거래가 보입니다(iOS 18+). iOS 15~17까지 빠지지 않으려면 결제 직후 거래를 직접 넘기세요(아래 「미전송 구매 큐」).
 - 개인정보 매니페스트는 구매 내역·사용자 ID를 "사용자와 연결, 추적 아님, 개발자 광고·마케팅"으로 선언합니다. 소개 클릭과 앱 결제를 잇는 것이 Apple의 "추적"(ATT 대상)에 해당하는지는 출시 전 확인 항목입니다.
 - 근거 문서: https://developer.apple.com/documentation/storekit/apptransaction/apptransactionid , https://developer.apple.com/documentation/storekit/transaction/all
+
+## 미전송 구매 큐 (0.2.2)
+
+0.2.1까지는 보내지 못한 구매를 기기에 저장하지 않고 다음 실행 때 `Transaction.all`을 다시 읽는 방식뿐이라, iOS 15~17에서 다른 결제 SDK(RevenueCat 등)가 소모성 거래를 먼저 `finish()`하면 목록에 남지 않아 처음부터 보고되지 않았습니다(`SKIncludeConsumableInAppPurchaseHistory`는 iOS 18부터). 0.2.2는 구매 보고를 **기기 큐**에 먼저 넣고 서버가 2xx로 받을 때까지 다시 보냅니다.
+
+**다른 결제 SDK(RevenueCat 등)를 쓰는 앱은 결제 완료 콜백에서 거래를 직접 넘기는 호출을 써야 소모성 결제가 빠지지 않습니다.**
+
+```swift
+// StoreKit 2를 직접 쓰는 앱: finish() 전에 넘깁니다.
+let result = try await product.purchase()
+if case .success(let verification) = result {
+    Codefluence.shared.purchaseCompleted(transaction: verification)
+    if case .verified(let transaction) = verification { await transaction.finish() }
+}
+// Transaction.updates(코드 교환·Ask to Buy·갱신)도 같은 값을 넘깁니다.
+for await update in Transaction.updates { Codefluence.shared.purchaseCompleted(transaction: update) }
+
+// RevenueCat: 결과의 StoreTransaction을 그대로 넘깁니다.
+let result = try await Purchases.shared.purchase(package: package)
+if !result.userCancelled { Codefluence.shared.purchaseCompleted(storeTransaction: result.transaction) }
+
+// JWS 문자열을 이미 가진 경우
+Codefluence.shared.purchaseCompleted(jws: signedTransactionJWS)
+```
+
+- `purchaseCompleted(storeTransaction:)`: RevenueCat iOS 5.x는 거래 JWS를 공개 API로 내주지 않고 Objective-C 속성 `jwsRepresentation`으로만 노출합니다(5.81.2 소스 확인). SDK는 그 속성이 있을 때만 읽고, 없으면 `purchaseCompleted()`처럼 스토어 목록을 다시 읽습니다. RevenueCat 의존성은 SDK에 없습니다.
+- 인자 없는 `purchaseCompleted()`·`reportPurchases()`는 그대로 쓸 수 있고, 소개로 온 설치에서는 읽은 거래를 같은 큐에 넣습니다.
+- 큐에 넣는 것은 **소개로 온 설치**(확인 완료, 또는 받아들인 확인이 아직 서버에 닿지 않은 상태)뿐입니다. 소개와 무관한 설치는 아무것도 저장·전송하지 않습니다. 확인이 끝나기 전의 구매는 큐에서 기다렸다가 확인 직후 보내고, 소개가 사라지면(거절·영구 실패) 지웁니다.
+- 저장 내용: 거래 JWS, 중복 방지 키(JWS 본문의 `transactionId`), 처음 넣은 시각, 시도 횟수, 다음 시도 시각. 가격·사용자 정보는 저장하지 않습니다. 위치는 `Application Support/Codefluence/purchase-queue.json`이며 디렉터리와 파일에 `isExcludedFromBackup`을 걸어 iCloud 백업·기기 이전으로 다른 기기에 복제되지 않습니다(파일 보호 `completeUntilFirstUserAuthentication`).
+- 상한: 100건(넘으면 오래된 것부터 버림), 90일. 같은 거래는 한 번만 들어가고, 이미 보고된 거래는 다시 넣지 않습니다.
+- 다시 보내는 때: 결제 직후, 앱 시작(`configure`), 앱 전면 전환(`start`를 쓴 경우), 네트워크 복구, 그리고 실행 중이면 예약된 다음 시도 시각.
+
+| 서버 응답 | 처리 |
+|---|---|
+| 2xx | 완료. 큐에서 지우고 보고 완료로 기록 |
+| 네트워크 오류·408·429·5xx | 재시도(30초 시작·2배·상한 6시간·full jitter, `CodefluenceBackoffPolicy`) |
+| 409 `credential_missing`(결제 조회 키 미등록) | 재시도(위와 같음). 개발자가 키를 등록하면 그때 받아들여집니다 |
+| 401·403(키 폐기) | 보존하고 하루 간격으로만 다시 시도(새 키가 담긴 앱 업데이트 대기) |
+| 400·404·422 등 그 밖의 4xx | 영구 거절. 큐에서 지움(스토어 목록에 남는 거래는 다음 목록 읽기 때 다시 보냄) |
+
+확인 요청(`/track/confirm`) 큐는 409를 영구 실패로 보므로 분류가 다릅니다.
+
+### `appTransaction` 필드
+
+구매 보고 본문(`POST /track/purchase`)은 `signedTransaction`·`build`에 더해, 얻을 수 있으면 선택 필드 **`appTransaction`**(= `AppTransaction.shared`의 Apple 서명 JWS 문자열)을 싣습니다. 소개 확인 때 서버에 결제 조회 키가 없어 AppTransaction이 lead에 묶이지 못했어도, 이후 구매 보고에서 다시 보내 귀속을 잇기 위한 값입니다. 얻지 못하면(2.5초 제한, iOS 16 미만) 키를 뺍니다. 모르는 필드를 무시하는 서버(현재 운영 서버 포함)에는 영향이 없습니다.
 
 ## 기존 무료 사용자 귀속 옵션
 
