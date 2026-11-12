@@ -107,7 +107,8 @@ final class AdRevenueTests: XCTestCase {
         XCTAssertEqual(outcome, .sent(attested: false))
         XCTAssertEqual(paths(), ["/track/signal-config", "/track/ad-revenue"])
         let body = AdMockProtocol.requests[1].body!
-        XCTAssertEqual(Set(body.keys), ["report"])
+        XCTAssertEqual(Set(body.keys), ["report", "build"])
+        XCTAssertEqual(body["build"] as? String, expectedBuild, "소개되지 않은 설치의 합계에도 빌드 종류가 실려야 한다")
         let report = body["report"] as! [String: Any]
         XCTAssertEqual(report["currency"] as? String, "USD")
         XCTAssertEqual(report["valueMicros"] as? Int, 1_500_000)

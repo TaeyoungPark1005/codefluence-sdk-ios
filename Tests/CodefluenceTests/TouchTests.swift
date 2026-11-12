@@ -68,6 +68,7 @@ final class TouchTests: XCTestCase {
         XCTAssertEqual(touches().first?["clickToken"] as? String, tokenB)
         XCTAssertEqual(touches().first?["appUserId"] as? String, "user-1")
         XCTAssertEqual(touches().first?["purchaseAccountToken"] as? String, "11111111-1111-4111-8111-111111111111")
+        XCTAssertEqual(touches().first?["build"] as? String, expectedBuild)
         XCTAssertEqual(defaults.string(forKey: "codefluence.clickToken"), tokenA, "첫 소개 토큰은 바뀌지 않는다")
     }
 

@@ -57,9 +57,26 @@ final class ValidateTests: XCTestCase {
 
     func testHealthySetupPassesEveryCheck() {
         let checks = run(makeSDK(), scheme: "adledger", schemes: ["adledger"])
-        XCTAssertEqual(checks.map(\.name), ["설정", "서버와 키", "URL 스킴"])
+        XCTAssertEqual(checks.map(\.name), ["설정", "서버와 키", "빌드", "URL 스킴"])
         XCTAssertTrue(checks.allSatisfy(\.passed), "\(checks)")
         XCTAssertEqual(ValidateMockProtocol.requests.filter { $0.path == "/sdk/heartbeat" }.count, 1, "점검이 첫 신호로도 도착해야 한다")
+    }
+
+    func testValidateHeartbeatCarriesTheBuildKind() {
+        _ = run(makeSDK())
+        let body = ValidateMockProtocol.requests.first { $0.path == "/sdk/heartbeat" }?.body
+        XCTAssertEqual(body?["build"] as? String, expectedBuild, "점검 신호가 개발 빌드인지 서버가 알아야 운영 집계에서 뺀다")
+        XCTAssertEqual(body?["sdkVersion"] as? String, "0.2.1")
+    }
+
+    func testBuildCheckTellsWhetherSignalsCountInProduction() {
+        let checks = run(makeSDK())
+        let build = check(checks, "빌드")
+        XCTAssertEqual(build?.passed, true, "빌드 종류는 안내 항목이라 점검 실패로 치지 않는다")
+        XCTAssertEqual(build?.hint, Codefluence.buildCheck(expectedBuild).hint)
+        let debug = Codefluence.buildCheck("debug").hint
+        XCTAssertTrue(debug.contains("개발 빌드") && debug.contains("운영 집계") && debug.contains("들어가지 않아요"), debug)
+        XCTAssertTrue(Codefluence.buildCheck("release").hint.contains("출시 빌드"))
     }
 
     func testRejectedKeyExplainsWhatToCheck() {

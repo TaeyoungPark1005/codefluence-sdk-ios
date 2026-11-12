@@ -134,6 +134,7 @@ final class PurchaseReportTests: XCTestCase {
         let purchases = MockPurchaseProtocol.requests.filter { $0.path.hasSuffix("/track/purchase") }
         XCTAssertEqual(purchases.count, 1)
         XCTAssertEqual(purchases.first?.body["signedTransaction"] as? String, "jws-2")
+        XCTAssertEqual(purchases.first?.body["build"] as? String, expectedBuild)
     }
 
     func testDuplicateResponseMarksReported() {

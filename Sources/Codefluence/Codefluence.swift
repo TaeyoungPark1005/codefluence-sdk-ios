@@ -123,7 +123,21 @@ public final class Codefluence {
     }
 
     /// SDK 버전. heartbeat가 서버에 보내 앱 버전별 신호 표에 나타납니다.
-    public static let version = "0.2.0"
+    public static let version = "0.2.1"
+
+    /// 이 빌드의 종류(`"debug"` 또는 `"release"`). 모든 서버 요청의 `build` 필드로 실립니다.
+    /// Swift Package는 호스트 앱과 같은 구성으로 컴파일되므로 Debug 구성(`DEBUG`)이거나 시뮬레이터면 `"debug"`입니다.
+    /// 서버는 `"debug"` 신호를 설치 점검에만 보여 주고 운영 집계·보상에서 뺍니다(sandbox).
+    /// TestFlight·샌드박스 결제는 스토어 응답으로 따로 판정하므로 여기서 보지 않습니다.
+    public static let build: String = {
+        #if DEBUG
+        return "debug"
+        #elseif targetEnvironment(simulator)
+        return "debug"
+        #else
+        return "release"
+        #endif
+    }()
 
     /// Info.plist의 URL Types에 등록된 스킴. 테스트가 바꿉니다.
     var registeredURLSchemes: () -> [String] = {
@@ -141,7 +155,8 @@ public final class Codefluence {
         var body: [String: Any] = [
             "platform": "ios",
             "appVersion": appVersion ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
-            "sdkVersion": sdkVersion
+            "sdkVersion": sdkVersion,
+            "build": Codefluence.build
         ]
         if let attestation { body["attestation"] = attestation }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -167,6 +182,7 @@ public final class Codefluence {
             checks.append(CodefluenceCheck(name: "설정", passed: false, hint: "pk_ 공개 키와 서버 주소(https://…)를 start 또는 configure에 넣으세요. 빌드 설정 값이 비어 있거나 xcconfig의 //에서 잘렸는지 확인하세요"))
         }
         let finish: () -> Void = { [self] in
+            checks.append(Self.buildCheck(Self.build))
             if let urlScheme {
                 let registered = registeredURLSchemes().contains(where: { $0.caseInsensitiveCompare(urlScheme) == .orderedSame })
                 checks.append(CodefluenceCheck(name: "URL 스킴", passed: registered, hint: registered
@@ -191,6 +207,13 @@ public final class Codefluence {
             }
             finish()
         }
+    }
+
+    /// 설치 점검의 「빌드」 항목. 개발 빌드의 신호는 서버가 운영 집계·보상에서 빼므로 그 사실을 알려 줍니다(통과·실패가 아니라 안내).
+    static func buildCheck(_ build: String) -> CodefluenceCheck {
+        build == "debug"
+            ? CodefluenceCheck(name: "빌드", passed: true, hint: "개발 빌드(Debug 구성 또는 시뮬레이터)로 표시돼요. 이 빌드의 신호·확인·결제는 대시보드에 「개발 빌드에서 확인됨」으로만 보이고 운영 집계와 보상에는 들어가지 않아요")
+            : CodefluenceCheck(name: "빌드", passed: true, hint: "출시 빌드로 표시돼요. 이 빌드의 신호는 운영 집계에 들어가요")
     }
 
     // MARK: - One-call helper
@@ -272,7 +295,7 @@ public final class Codefluence {
               let url = URL(string: host.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/track/touch") else { return }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["clickToken": token, "appUserId": appUserId, "purchaseAccountToken": installToken])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["clickToken": token, "appUserId": appUserId, "purchaseAccountToken": installToken, "build": Codefluence.build])
         session.dataTask(with: request) { [weak self] _, response, _ in
             guard let self, let status = (response as? HTTPURLResponse)?.statusCode else { return }
             guard (200..<300).contains(status) || [400, 401, 403, 404, 409, 422].contains(status) else { return }
@@ -413,7 +436,7 @@ public final class Codefluence {
     private func reportPurchaseJWS(_ jws: String, completion: ((Result<Void, Error>) -> Void)?) {
         stateLock.lock(); let host = apiHost; let key = publicKey; stateLock.unlock()
         guard let host, key.hasPrefix("pk_"), let url = URL(string: host.absoluteString + "/track/purchase") else { completion?(.failure(failure(11, "SDK is not configured"))); return }
-        var request = URLRequest(url: url); request.httpMethod = "POST"; request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": jws])
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": jws, "build": Codefluence.build])
         session.dataTask(with: request) { [weak self] _, response, error in guard let self else { return }; let result: Result<Void, Error> = error.map { .failure($0) } ?? (((response as? HTTPURLResponse)?.statusCode ?? 500) < 300 ? .success(()) : .failure(self.failure(1, "Purchase report failed"))); self.deliverVoid(result, completion) }.resume()
     }
     private func deliverVoid(_ result: Result<Void, Error>, _ completion: ((Result<Void, Error>) -> Void)?) { guard let completion else { return }; DispatchQueue.main.async { completion(result) } }
@@ -673,6 +696,7 @@ public final class Codefluence {
         var payload: [String: Any] = ["clickToken": clickToken, "appUserId": appUserId]
         payload["launchKind"] = preferences.string(forKey: "codefluence.pendingLaunchKind") ?? "first_launch"
         payload["purchaseAccountToken"] = purchaseAccountToken()
+        payload["build"] = Codefluence.build
         stateLock.lock(); let source = transactionSource; stateLock.unlock()
         let baseRequest = request
         let basePayload = payload
@@ -764,7 +788,7 @@ public final class Codefluence {
             for transaction in pending {
                 var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 10
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": transaction.jws])
+                request.httpBody = try? JSONSerialization.data(withJSONObject: ["signedTransaction": transaction.jws, "build": Codefluence.build])
                 if let (_, response) = try? await self.session.data(for: request), let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) {
                     accepted.append(transaction.transactionId)
                 }

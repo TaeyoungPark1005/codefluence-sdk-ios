@@ -111,6 +111,7 @@ final class ConfirmationTests: XCTestCase {
         let payload = try? JSONSerialization.jsonObject(with: MockConfirmationProtocol.requests[0].body) as? [String: String]
         XCTAssertEqual(payload?["clickToken"], "auto-token")
         XCTAssertEqual(payload?["appUserId"], "customer")
+        XCTAssertEqual(payload?["build"], expectedBuild)
     }
 
     /// 서버가 토큰이나 공개 키를 거절하면(401) 원인을 짐작할 수 있도록 상태 코드를 메시지에 남긴다.

@@ -107,6 +107,7 @@ final class ActivitySignalTests: XCTestCase {
         let attestBody = try XCTUnwrap(SignalMockProtocol.requests[2].body)
         XCTAssertEqual(attestBody["leadId"] as? String, "lead-1")
         XCTAssertEqual(attestBody["purchaseAccountToken"] as? String, "token-1")
+        XCTAssertEqual(attestBody["build"] as? String, expectedBuild)
         XCTAssertEqual(attestBody["challenge"] as? String, "challenge-abc")
         XCTAssertEqual(attestBody["keyId"] as? String, "key-id-1-aaaaaaaaaaaaaaaaaaaa")
         // attestKey signs SHA-256(challenge); the assertion signs SHA-256(challenge + "\n" + milestones).
@@ -117,6 +118,8 @@ final class ActivitySignalTests: XCTestCase {
         XCTAssertEqual(proof["type"] as? String, "app_attest")
         XCTAssertEqual(proof["assertion"] as? String, Data("assertion-1".utf8).base64EncodedString())
         XCTAssertEqual(signal["milestones"] as? [String], [])
+        XCTAssertEqual(signal["build"] as? String, expectedBuild)
+        XCTAssertEqual(SignalMockProtocol.requests[1].body?["build"] as? String, expectedBuild, "challenge에도 빌드 종류가 실려야 서버가 운영 lead의 개발 빌드 수집을 멈출 수 있다")
         // Same KST day: no second request. Next day: signal only, the key is not registered again.
         let outcome3 = await sdk.performActivitySignal(now: now.addingTimeInterval(3600))
         XCTAssertEqual(outcome3, .skipped(reason: "already_sent_today"))
@@ -197,5 +200,5 @@ final class ActivitySignalTests: XCTestCase {
         XCTAssertEqual(Codefluence.kstDay(Date(timeIntervalSince1970: 1_790_040_000)), "2026-09-22")
     }
 
-    func testSdkVersionIs020() { XCTAssertEqual(Codefluence.version, "0.2.0") }
+    func testSdkVersionIs021() { XCTAssertEqual(Codefluence.version, "0.2.1") }
 }

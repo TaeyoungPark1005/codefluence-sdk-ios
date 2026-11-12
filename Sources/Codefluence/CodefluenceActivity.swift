@@ -115,7 +115,9 @@ extension Codefluence {
         request.httpMethod = method
         request.timeoutInterval = 10
         request.setValue("Bearer \(identity.key)", forHTTPHeaderField: "Authorization")
-        if let body {
+        if var body {
+            // 신호·증명·광고 수익 요청에도 빌드 종류를 싣는다. 서버는 개발 빌드를 운영 집계에서 뺀다.
+            body["build"] = Codefluence.build
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         }
